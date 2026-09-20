@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v12 - 20 Sep"
+VERSION = "v13 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -230,7 +230,7 @@ def month_bounds(anchor=None):
             datetime.combine(end, time(23, 59, 59)))
 
 
-def fetch_price_lists(s_sess, url, start, end):
+def fetch_price_lists(s, url, start, end):
     """Every price list submitted inside the week. Date filtered server-side.
 
     The status filter used to be part of this query too. It is not any more: a
@@ -741,7 +741,7 @@ def main():
             print("   %s  %s  submitted %s" % (p.get("id"), p.get("label"),
                                                p.get("submitDate")))
         if pls:
-            v, unknown = vendor_impacts(summarize(s, url, pls[0].get("id")))
+            v, unknown = vendor_impacts(summarize(s_sess, url, pls[0].get("id")))
             if unknown is not None:
                 print("\nCould not find the SKU Impact column in the reply.")
                 print("These are the columns it returned - tell me which one:")
