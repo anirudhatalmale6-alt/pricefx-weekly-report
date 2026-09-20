@@ -66,6 +66,23 @@ THE CATEGORY SUMMARY  (written on every run)
   category_assignment_<from>_to_<to>.csv
       Every price list and which category it landed in. Check this one.
 
+  SPLITTING A PRICE LIST THAT COVERS SEVERAL CATEGORIES
+  An "All Stocked" list spans several 1st level hierarchies, so filing the
+  whole thing under one category would be wrong. Once hierarchy_field is set in
+  the ini, the script asks PriceFx for that list's impact broken down by
+  hierarchy and spreads it across the categories, exactly as you would by hand.
+
+  To find that field, once:
+
+      pricefx_weekly.py --find-hierarchy
+
+  It tries each product attribute as Group By and keeps the one whose values
+  come back as your 22 categories. That is a measurement, not a guess - a wrong
+  field scores zero. It prints the line to paste into the ini.
+
+  Stocked or Non-Stocked still comes from the name. A price list whose name
+  says neither covers both, which is your Notable Cross Category row.
+
   A price list is attributed by its description name, the way you do it now.
   Anything whose name carries no category falls into Notable Cross Category -
   a vendor-named list, an initiative name, a part-number list, and so on.

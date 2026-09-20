@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v10 - 20 Sep"
+VERSION = "v11 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -122,6 +122,9 @@ def load_config():
         # Optional. Set it and the monthly file lands somewhere of its own;
         # leave it out and monthly and weekly share one folder.
         "month_out_dir": c.get("monthly_output_folder", "").strip() or None,
+        # Which product attribute holds the 1st level hierarchy. Run
+        # --find-hierarchy once and put the answer here.
+        "hierarchy_field": c.get("hierarchy_field", "").strip() or None,
         "statuses": [x.strip() for x in
                      c.get("workflow_statuses", DEFAULT_STATUSES).split(",")
                      if x.strip()],
@@ -207,7 +210,7 @@ def month_bounds(anchor=None):
             datetime.combine(end, time(23, 59, 59)))
 
 
-def fetch_price_lists(s, url, start, end):
+def fetch_price_lists(s_sess, url, start, end):
     """Every price list submitted inside the week. Date filtered server-side.
 
     The status filter used to be part of this query too. It is not any more: a
@@ -243,12 +246,17 @@ def fetch_price_lists(s, url, start, end):
     return out
 
 
-def summarize(s, url, pl_id):
-    """The Calculate button. Returns vendor rows with SKU Impact already summed."""
+def summarize(s, url, pl_id, group_field=None):
+    """The Calculate button. Returns rows with SKU Impact already summed.
+
+    group_field is what the Summary screen's Group By is set to. attribute19 is
+    Vendor Name; the 1st level hierarchy lives in another attribute, which is
+    what find_hierarchy_field works out.
+    """
     return post(s, url, "/pricelistmanager.summarize", {
         "data": {"query": {
             "objects": ["%s.PL" % pl_id],
-            "productGroupBy": VENDOR_FIELD,
+            "productGroupBy": group_field or VENDOR_FIELD,
             "count": True,
             "projections": [{"weight": "null", "aggregationMode": mode,
                              "fieldName": field} for mode, field in PROJECTIONS],
@@ -346,8 +354,8 @@ def drop_grand_total(rows):
 
     The Summary reply returns a grand total as well as one row per vendor. Left
     in, it DOUBLES the annual impact and shows up in the vendor list as a
-    phantom vendor whose number is the whole price list - which is exactly what
-    Pratik spotted on 4278: (261,701) next to the real (261,345).
+    phantom vendor whose number is the whole price list, sitting right next to
+    the real biggest vendor and looking almost right.
 
     It is identified by what makes it a total - its value equals the sum of
     every other row - rather than by its label, which is blank here but need not
@@ -366,11 +374,62 @@ def drop_grand_total(rows):
     return [r for i, r in enumerate(rows) if i != drop]
 
 
+def score_as_hierarchy(rows, field):
+    """How many DISTINCT values in these rows are one of the 22 categories.
+
+    This is what makes finding the hierarchy field a measurement rather than a
+    guess: the category list is known exactly, so the right field is the one
+    whose values ARE those categories. A wrong field scores zero.
+    """
+    known = set(cat_norm(c) for c in CATEGORIES)
+    seen, hits = set(), set()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        v = r.get(field)
+        if v in (None, ""):
+            continue
+        n = cat_norm(v)
+        seen.add(n)
+        if n in known:
+            hits.add(n)
+    return len(hits), len(seen)
+
+
+def find_hierarchy_field(s, url, pl_id, candidates=None):
+    """Work out which product attribute holds the 1st level hierarchy.
+
+    Tries each candidate as the Summary screen's Group By and keeps the one
+    whose returned labels match the known category list. Verifiable, so it can
+    be trusted without anyone reading a dropdown to me.
+    """
+    if candidates is None:
+        candidates = ["attribute%d" % i for i in range(1, 41)]
+    results = []
+    for f in candidates:
+        if f == VENDOR_FIELD:
+            continue
+        try:
+            rows = rows_from(summarize(s, url, pl_id, f))
+        except Exception:
+            continue
+        hits, seen = score_as_hierarchy(rows, f)
+        if seen:
+            results.append((hits, seen, f))
+    results.sort(key=lambda x: (-x[0], x[1]))
+    return results
+
+
 def cat_norm(x):
     """Normalise for matching. '&' becomes 'and' because the sheet writes
     'PLCs & HMIs' where the analyst types 'PLCs And HMIs'."""
     x = str(x).lower().replace("&", " and ")
     return "".join(ch for ch in x if ch.isalnum())
+
+
+# Normalised category names, for deciding whether a hierarchy label the API
+# returns is one of his 22 or something that belongs in the cross row.
+KNOWN_CATS = set(cat_norm(c) for c in CATEGORIES)
 
 
 def load_overrides():
@@ -487,13 +546,17 @@ def rows_from(summary):
     return []
 
 
-def vendor_impacts(summary):
-    """[(vendor, sku_impact)] from one summarize reply."""
+def vendor_impacts(summary, key_hint=None):
+    """[(label, sku_impact)] from one summarize reply.
+
+    key_hint names the column to read the label from, for when the reply was
+    grouped by something other than vendor.
+    """
     rows = rows_from(summary)
     if not rows or not isinstance(rows[0], dict):
         return [], None
     sample = rows[0]
-    vkey = pick_vendor_key(rows)
+    vkey = key_hint if (key_hint and key_hint in sample) else pick_vendor_key(rows)
     ikey = find_key(sample, "SKU Impact", "skuImpact", "sum_SKU_Impact")
     if not ikey:
         return [], sample
@@ -517,6 +580,10 @@ def main():
                          "Bare --month does the month that has just finished")
     ap.add_argument("--check", action="store_true",
                     help="prove login and filters work, write nothing")
+    ap.add_argument("--find-hierarchy", nargs="?", const="", metavar="PRICELIST",
+                    dest="find_hierarchy",
+                    help="work out which attribute holds the 1st level "
+                         "hierarchy, then stop. Optionally name a price list")
     a = ap.parse_args()
     if a.week and a.month is not None:
         sys.exit("Use --week or --month, not both.")
@@ -537,12 +604,39 @@ def main():
                             start.strftime("%a %d %b %Y %H:%M:%S"),
                             end.strftime("%a %d %b %Y %H:%M:%S")))
 
-    s, url = connect(cfg)
+    s_sess, url = connect(cfg)
     print("Signed in to %s as %s" % (cfg["partition"], cfg["account"]))
+
+    if a.find_hierarchy is not None:
+        pid = a.find_hierarchy.strip()
+        if not pid:
+            some = fetch_price_lists(s_sess, url, start, end)
+            if not some:
+                sys.exit("No price lists in that window to test against. "
+                         "Pass one: --find-hierarchy 4271")
+            pid = some[0].get("id")
+        print("\nTesting Group By against price list %s" % pid)
+        print("Looking for the field whose values are your 22 categories.\n")
+        results = find_hierarchy_field(s_sess, url, pid)
+        if not results:
+            print("Nothing came back for any attribute.")
+            return
+        for hits, seen, f in results[:12]:
+            mark = "  <-- this is it" if hits and hits == results[0][0] else ""
+            print("  %-16s %2d of %2d values are known categories%s"
+                  % (f, hits, seen, mark))
+        best = results[0]
+        print()
+        if best[0] >= 2:
+            print("Put this line in pricefx_config.ini:")
+            print("    hierarchy_field = %s" % best[2])
+        else:
+            print("No field matched the category list. Send me this output.")
+        return
 
     print("Counting these workflow statuses: %s" % ", ".join(cfg["statuses"]))
 
-    everything = fetch_price_lists(s, url, start, end)
+    everything = fetch_price_lists(s_sess, url, start, end)
     wanted = set(_norm(x) for x in cfg["statuses"])
     pls = [p for p in everything if _norm(status_of(p)) in wanted]
     left_out = [p for p in everything if _norm(status_of(p)) not in wanted]
@@ -574,7 +668,7 @@ def main():
     for i, p in enumerate(pls, 1):
         pid = p.get("id")
         print("  [%d/%d] price list %s" % (i, len(pls), pid))
-        summary = summarize(s, url, pid)
+        summary = summarize(s_sess, url, pid)
         if first_rows is None:
             got = rows_from(summary)
             if got and isinstance(got[0], dict):
@@ -585,9 +679,25 @@ def main():
         big = [(n, v) for n, v in vend if abs(v) >= cfg["threshold"]]
         big.sort(key=lambda x: -abs(x[1]))
         label = p.get("label")
-        entries.append((pid, label, sum(v for _, v in vend),
-                        category_of(pid, label, overrides),
-                        stock_of(pid, label, overrides)))
+        total = sum(v for _, v in vend)
+        stock = stock_of(pid, label, overrides)
+        forced = category_of(pid, label, overrides)
+        if stock == "unspecified":
+            # covers both stocked and non-stocked, or says neither - his
+            # definition of Notable Cross Category
+            parts = [(None, total)]
+        elif cfg["hierarchy_field"]:
+            # "go to each price list and check the sum impact by 1st level
+            # hierarchy" - an All Stocked list spans several categories, so
+            # ask PriceFx for the split instead of filing the lot under one.
+            hier, _ = vendor_impacts(
+                summarize(s_sess, url, pid, cfg["hierarchy_field"]),
+                key_hint=cfg["hierarchy_field"])
+            parts = [(c if cat_norm(c) in KNOWN_CATS else None, v)
+                     for c, v in hier] or [(forced, total)]
+        else:
+            parts = [(forced, total)]
+        entries.append((pid, label, total, parts, stock))
         report.append({
             "Price List Number": pid,
             "Price List Name": p.get("label"),
@@ -618,14 +728,18 @@ def build_category_summary(entries):
     pasted straight down column B. cross is the Notable Cross Category line.
     """
     buckets, cross_names, cross_total = {}, [], 0.0
-    for pid, name, total, cat, stock in entries:
-        if cat is None:
+    for pid, name, total, parts, stock in entries:
+        crossed = False
+        for cat, amount in parts:
+            if cat is None:
+                cross_total += amount
+                crossed = True
+                continue
+            b = buckets.setdefault(cat, {"Stocked": 0.0, "Non-Stocked": 0.0,
+                                         "unspecified": 0.0})
+            b[stock] += amount
+        if crossed:
             cross_names.append(str(name))
-            cross_total += total
-            continue
-        b = buckets.setdefault(cat, {"Stocked": 0.0, "Non-Stocked": 0.0,
-                                     "unspecified": 0.0})
-        b[stock] += total
 
     # EVERY category, in the sheet's own order, including the ones with no
     # activity. His sheet has a fixed row per category, so a short list would
@@ -683,10 +797,13 @@ def write_category_summary(entries, start, end, out_dir):
         w = csv.writer(fh)
         w.writerow(["Price List Number", "Price List Name", "Impact (000s)",
                     "1st Level", "Stocked / Non-Stocked", "How it was decided"])
-        for pid, name, total, cat, stock in entries:
-            w.writerow([pid, name, round(total / 1000.0, 1),
-                        cat or CROSS, stock,
-                        "name" if cat else "no category in the name"])
+        for pid, name, total, parts, stock in entries:
+            for cat, amount in parts:
+                w.writerow([pid, name, round(amount / 1000.0, 1),
+                            cat or CROSS, stock,
+                            ("1st level hierarchy" if len(parts) > 1
+                             else ("name" if cat else "no stocked/non-stocked "
+                                   "in the name"))])
     print("Where each price list landed: %s" % apath)
     return path
 
