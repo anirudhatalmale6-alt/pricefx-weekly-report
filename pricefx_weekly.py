@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v14 - 20 Sep"
+VERSION = "v15 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -672,6 +672,16 @@ def main():
     a = ap.parse_args()
     if a.week and a.month is not None:
         sys.exit("Use --week or --month, not both.")
+    if a.find_hierarchy and not a.find_hierarchy.strip().isdigit():
+        sys.exit(
+            "\n'%s' is not a price list number.\n\n"
+            "This is what it looks like when the hyphen in --find-hierarchy is "
+            "lost\non the way into the terminal: --find hierarchy gets read as "
+            "--find-hierarchy\nwith the word 'hierarchy' as the price list, so "
+            "it searches something\nthat does not exist and reports finding "
+            "nothing.\n\n"
+            "Retype it with the hyphen, and give it a real price list number:\n"
+            "    --find-hierarchy 4271\n" % a.find_hierarchy)
 
     print("pricefx_weekly %s" % VERSION)
     print("Running: %s" % os.path.abspath(__file__))
