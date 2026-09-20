@@ -184,6 +184,15 @@ def summarize(s, url, pl_id):
     }, {"dataLocale": "en"})
 
 
+def _norm(x):
+    return "".join(ch for ch in str(x).lower() if ch.isalnum())
+
+
+# The nine metric labels, normalised. Used to rule columns OUT when hunting for
+# the vendor label: whatever carries the vendor name, it is not one of these.
+METRIC_NAMES = set(_norm(label) for _, label in PROJECTIONS)
+
+
 def find_key(row, *wanted):
     """Match a column by meaning, not by exact spelling.
 
@@ -192,16 +201,53 @@ def find_key(row, *wanted):
     'sum_SKU_Impact'. Rather than guess once and be wrong silently, look for any
     key whose letters match.
     """
-    def norm(x):
-        return "".join(ch for ch in str(x).lower() if ch.isalnum())
-    targets = [norm(w) for w in wanted]
+    targets = [_norm(w) for w in wanted]
     for k in row:
-        if norm(k) in targets:
+        if _norm(k) in targets:
             return k
     for k in row:
-        if any(t in norm(k) for t in targets):
+        if any(t in _norm(k) for t in targets):
             return k
     return None
+
+
+def looks_numeric(v):
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    try:
+        float(str(v).replace(",", "").replace("$", "").strip())
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def pick_vendor_key(sample):
+    """Which key in a summarize row carries the vendor name.
+
+    By name first. If the reply calls it something I have not seen, fall back on
+    the SHAPE of the value: the row is a vendor label plus nine totals, so the
+    vendor is the only piece of text in it that is not a number. That works
+    whatever the key happens to be called, which guessing at names does not.
+    """
+    k = find_key(sample, VENDOR_FIELD, "vendorName", "vendor name", "vendor",
+                 "productAttribute19", "attribute19")
+    if k:
+        return k
+    for k2, v in sample.items():
+        if _norm(k2) in METRIC_NAMES:
+            continue
+        if v is None or looks_numeric(v):
+            continue
+        if isinstance(v, str) and v.strip():
+            return k2
+    return None
+
+
+def thousands(v):
+    """206488 -> '+$206k'.  -133187 -> '-$133k'.  Nearest thousand."""
+    return "%s$%dk" % ("-" if v < 0 else "+", int(round(abs(v) / 1000.0)))
 
 
 def rows_from(summary):
@@ -225,7 +271,7 @@ def vendor_impacts(summary):
     if not rows or not isinstance(rows[0], dict):
         return [], None
     sample = rows[0]
-    vkey = find_key(sample, VENDOR_FIELD, "vendorName", "vendor name", "vendor")
+    vkey = pick_vendor_key(sample)
     ikey = find_key(sample, "SKU Impact", "skuImpact", "sum_SKU_Impact")
     if not ikey:
         return [], sample
@@ -235,7 +281,9 @@ def vendor_impacts(summary):
             val = float(r.get(ikey) or 0)
         except (TypeError, ValueError):
             continue
-        out.append((str(r.get(vkey, "(no vendor)")), val))
+        name = r.get(vkey) if vkey else None
+        name = str(name).strip() if name not in (None, "") else "(no vendor)"
+        out.append((name, val))
     return out, None
 
 
@@ -277,11 +325,16 @@ def main():
         print("\nCheck only - nothing written.")
         return
 
-    report, unknown_cols = [], None
+    report, unknown_cols, first_row = [], None, None
     for i, p in enumerate(pls, 1):
         pid = p.get("id")
         print("  [%d/%d] price list %s" % (i, len(pls), pid))
-        vend, unknown = vendor_impacts(summarize(s, url, pid))
+        summary = summarize(s, url, pid)
+        if first_row is None:
+            got = rows_from(summary)
+            if got and isinstance(got[0], dict):
+                first_row = got[0]
+        vend, unknown = vendor_impacts(summary)
         if unknown is not None and unknown_cols is None:
             unknown_cols = unknown
         big = [(n, v) for n, v in vend if abs(v) >= cfg["threshold"]]
@@ -294,10 +347,8 @@ def main():
             "Created By": p.get("createdByName"),
             "Submitted": p.get("submitDate"),
             "Calculated Annual Impact (000s)": round(sum(v for _, v in vend) / 1000.0, 1),
-            # format(), not %-formatting: the thousands comma is not a valid
-            # flag in %f and raises ValueError the moment a vendor qualifies.
             "Vendors over threshold": "; ".join(
-                "%s (%s)" % (n, format(v, "+,.0f")) for n, v in big),
+                "%s (%s)" % (n, thousands(v)) for n, v in big),
         })
 
     if unknown_cols is not None:
@@ -305,7 +356,31 @@ def main():
               "so those impacts are zero. Columns returned were:")
         print("   " + ", ".join(sorted(unknown_cols)))
 
+    write_columns_note(first_row, cfg["out_dir"])
     write_report(report, start, end, cfg["out_dir"])
+
+
+def write_columns_note(sample, out_dir):
+    """Record what the summarize reply calls its columns.
+
+    Names and types only - no figures and no vendor names - so it can be sent
+    on without passing anything commercial around. It exists so that if the
+    vendor column is ever read wrongly, the answer is already written down
+    instead of costing another round of screenshots.
+    """
+    if not sample:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "summary_columns.txt")
+    chosen = pick_vendor_key(sample)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("Columns in the summarize reply (names and types only).\n")
+        fh.write("Vendor name was read from: %s\n\n" % (chosen or "NOTHING - not found"))
+        for k in sample:
+            fh.write("  %-40s %s%s\n" % (
+                k,
+                "number" if looks_numeric(sample[k]) else type(sample[k]).__name__,
+                "   <- used as the vendor name" if k == chosen else ""))
 
 
 def write_report(rows, start, end, out_dir):
