@@ -80,8 +80,24 @@ THE CATEGORY SUMMARY  (written on every run)
   come back as your 22 categories. That is a measurement, not a guess - a wrong
   field scores zero. It prints the line to paste into the ini.
 
-  Stocked or Non-Stocked still comes from the name. A price list whose name
-  says neither covers both, which is your Notable Cross Category row.
+  STOCKED OR NON-STOCKED
+  Best case, from the parts themselves. Set plci_field and the script reads
+  each list's PLCI codes: 25 and 45 mean stocked, 14/34/74/84 non-stocked
+  (change those in the ini if the non-stocked set turns out different).
+
+      all stocked codes      -> Stocked
+      all non-stocked codes  -> Non-Stocked
+      BOTH in one list       -> Notable Cross Category
+
+  That last line is your own definition - a cross-category list "comprises of
+  part #'s that are stocked or non-stocked" - so it is detected rather than
+  guessed. A code the script does not recognise is ignored instead of being
+  counted as either, so a new code cannot quietly flip a list.
+
+  Without plci_field it falls back to the words in the name, and a name saying
+  neither means the list covers both.
+
+  --find-hierarchy reports the PLCI field alongside the hierarchy one.
 
   A price list is attributed by its description name, the way you do it now.
   Anything whose name carries no category falls into Notable Cross Category -

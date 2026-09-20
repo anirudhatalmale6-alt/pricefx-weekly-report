@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v11 - 20 Sep"
+VERSION = "v12 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -88,6 +88,15 @@ CATEGORY_ALIASES = {
 }
 
 CROSS = "Notable Cross Category"
+
+# PLCI is the product code that says whether a part is stocked. His words:
+# "Stocked PLCI is 25 and 45 always / Non-Stocked PLCI is 14, 34, 74, 84".
+# Overridable in the ini because he wants to double-confirm the non-stocked set.
+DEFAULT_STOCKED_PLCI = "25, 45"
+DEFAULT_NONSTOCKED_PLCI = "14, 34, 74, 84"
+
+# Used only when hunting for the PLCI field.
+PLCI_PROBE = ["25", "45", "14", "34", "74", "84"]
 OVERRIDES = os.path.join(HERE, "category_overrides.csv")
 
 # The nine things the Summary screen totals. Only SKU Impact is used below, but
@@ -125,6 +134,17 @@ def load_config():
         # Which product attribute holds the 1st level hierarchy. Run
         # --find-hierarchy once and put the answer here.
         "hierarchy_field": c.get("hierarchy_field", "").strip() or None,
+        # Which attribute holds PLCI, and which codes mean what. With this set,
+        # stocked / non-stocked is read from the data instead of from the words
+        # in the price list name.
+        "plci_field": c.get("plci_field", "").strip() or None,
+        "stocked_plci": set(
+            x.strip() for x in
+            c.get("stocked_plci", DEFAULT_STOCKED_PLCI).split(",") if x.strip()),
+        "nonstocked_plci": set(
+            x.strip() for x in
+            c.get("nonstocked_plci", DEFAULT_NONSTOCKED_PLCI).split(",")
+            if x.strip()),
         "statuses": [x.strip() for x in
                      c.get("workflow_statuses", DEFAULT_STATUSES).split(",")
                      if x.strip()],
@@ -396,6 +416,24 @@ def score_as_hierarchy(rows, field):
     return len(hits), len(seen)
 
 
+def score_as_plci(rows, field, known):
+    """How many distinct values of this field are known PLCI codes."""
+    seen, hits = set(), set()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        v = r.get(field)
+        if v in (None, ""):
+            continue
+        t = str(v).strip()
+        if t.endswith(".0"):
+            t = t[:-2]
+        seen.add(t)
+        if t in known:
+            hits.add(t)
+    return len(hits), len(seen)
+
+
 def find_hierarchy_field(s, url, pl_id, candidates=None):
     """Work out which product attribute holds the 1st level hierarchy.
 
@@ -405,7 +443,8 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
     """
     if candidates is None:
         candidates = ["attribute%d" % i for i in range(1, 41)]
-    results = []
+    known_plci = set(PLCI_PROBE)
+    cats, plcis = [], []
     for f in candidates:
         if f == VENDOR_FIELD:
             continue
@@ -415,9 +454,41 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
             continue
         hits, seen = score_as_hierarchy(rows, f)
         if seen:
-            results.append((hits, seen, f))
-    results.sort(key=lambda x: (-x[0], x[1]))
-    return results
+            cats.append((hits, seen, f))
+        phits, pseen = score_as_plci(rows, f, known_plci)
+        if pseen:
+            plcis.append((phits, pseen, f))
+    cats.sort(key=lambda x: (-x[0], x[1]))
+    plcis.sort(key=lambda x: (-x[0], x[1]))
+    return cats, plcis
+
+
+def classify_plci(rows, stocked, nonstocked):
+    """Stocked, Non-Stocked, or unspecified - decided by the PLCI codes present.
+
+    His description: a normal price list is all one or all the other, while a
+    Notable Cross Category list "comprise of part #'s that are stocked or
+    non-stocked" - both at once. So a mixed list is not an awkward case to
+    guess at, it is precisely the thing the cross-category row is for, and
+    returning unspecified sends it there.
+
+    Codes we do not recognise are ignored rather than counted as either, so an
+    unknown code cannot silently flip a list into the wrong column.
+    """
+    saw_s = saw_n = False
+    for code, amount in rows:
+        c = str(code).strip()
+        if c.endswith(".0"):
+            c = c[:-2]
+        if c in stocked:
+            saw_s = True
+        elif c in nonstocked:
+            saw_n = True
+    if saw_s and not saw_n:
+        return "Stocked"
+    if saw_n and not saw_s:
+        return "Non-Stocked"
+    return None if not (saw_s or saw_n) else "unspecified"
 
 
 def cat_norm(x):
@@ -617,21 +688,39 @@ def main():
             pid = some[0].get("id")
         print("\nTesting Group By against price list %s" % pid)
         print("Looking for the field whose values are your 22 categories.\n")
-        results = find_hierarchy_field(s_sess, url, pid)
-        if not results:
-            print("Nothing came back for any attribute.")
-            return
-        for hits, seen, f in results[:12]:
-            mark = "  <-- this is it" if hits and hits == results[0][0] else ""
-            print("  %-16s %2d of %2d values are known categories%s"
-                  % (f, hits, seen, mark))
-        best = results[0]
-        print()
-        if best[0] >= 2:
-            print("Put this line in pricefx_config.ini:")
-            print("    hierarchy_field = %s" % best[2])
+        cats, plcis = find_hierarchy_field(s_sess, url, pid)
+        lines = []
+
+        print("1st LEVEL HIERARCHY - looking for your 22 categories")
+        if cats and cats[0][0] >= 2:
+            for hits, seen, f in cats[:6]:
+                mark = "  <-- this one" if hits == cats[0][0] else ""
+                print("  %-16s %2d of %2d values are known categories%s"
+                      % (f, hits, seen, mark))
+            lines.append("hierarchy_field = %s" % cats[0][2])
         else:
-            print("No field matched the category list. Send me this output.")
+            print("  nothing matched the category list")
+
+        print("\nPLCI - looking for codes %s"
+              % ", ".join(PLCI_PROBE))
+        if plcis and plcis[0][0] >= 2:
+            for hits, seen, f in plcis[:6]:
+                mark = "  <-- this one" if hits == plcis[0][0] else ""
+                print("  %-16s %2d of %2d values are known PLCI codes%s"
+                      % (f, hits, seen, mark))
+            lines.append("plci_field = %s" % plcis[0][2])
+        else:
+            print("  nothing matched the PLCI codes")
+
+        print()
+        if lines:
+            print("Put these lines in pricefx_config.ini:")
+            for l in lines:
+                print("    %s" % l)
+        else:
+            print("Neither field was found on this price list. Try another:")
+            print("    --find-hierarchy 4271")
+        print("\nThis price list may simply not contain every category or code.")
         return
 
     print("Counting these workflow statuses: %s" % ", ".join(cfg["statuses"]))
@@ -681,6 +770,21 @@ def main():
         label = p.get("label")
         total = sum(v for _, v in vend)
         stock = stock_of(pid, label, overrides)
+        stock_how = "name"
+        if overrides.get(cat_norm(pid), ("", ""))[1] or \
+                overrides.get(cat_norm(label), ("", ""))[1]:
+            stock_how = "override"
+        elif cfg["plci_field"]:
+            by_code, _ = vendor_impacts(
+                summarize(s_sess, url, pid, cfg["plci_field"]),
+                key_hint=cfg["plci_field"])
+            from_plci = classify_plci(by_code, cfg["stocked_plci"],
+                                      cfg["nonstocked_plci"])
+            if from_plci:
+                if from_plci != stock and stock != "unspecified":
+                    print("      note: name says %s, PLCI says %s - "
+                          "going with PLCI" % (stock, from_plci))
+                stock, stock_how = from_plci, "PLCI"
         forced = category_of(pid, label, overrides)
         if stock == "unspecified":
             # covers both stocked and non-stocked, or says neither - his
@@ -697,7 +801,7 @@ def main():
                      for c, v in hier] or [(forced, total)]
         else:
             parts = [(forced, total)]
-        entries.append((pid, label, total, parts, stock))
+        entries.append((pid, label, total, parts, stock, stock_how))
         report.append({
             "Price List Number": pid,
             "Price List Name": p.get("label"),
@@ -728,7 +832,7 @@ def build_category_summary(entries):
     pasted straight down column B. cross is the Notable Cross Category line.
     """
     buckets, cross_names, cross_total = {}, [], 0.0
-    for pid, name, total, parts, stock in entries:
+    for pid, name, total, parts, stock, _how in entries:
         crossed = False
         for cat, amount in parts:
             if cat is None:
@@ -765,7 +869,7 @@ def build_category_summary(entries):
         if cross_total < 0:
             cross = "%s - $(%s) K" % (",".join(cross_names),
                                       "{:,.0f}".format(abs(cross_total) / 1000.0))
-    grand = sum(t for _, _, t, _, _ in entries)
+    grand = sum(e[2] for e in entries)
     return rows, cross, grand
 
 
@@ -797,13 +901,13 @@ def write_category_summary(entries, start, end, out_dir):
         w = csv.writer(fh)
         w.writerow(["Price List Number", "Price List Name", "Impact (000s)",
                     "1st Level", "Stocked / Non-Stocked", "How it was decided"])
-        for pid, name, total, parts, stock in entries:
+        for pid, name, total, parts, stock, how in entries:
             for cat, amount in parts:
+                cat_how = ("1st level hierarchy" if len(parts) > 1
+                           else ("name" if cat else "covers both"))
                 w.writerow([pid, name, round(amount / 1000.0, 1),
                             cat or CROSS, stock,
-                            ("1st level hierarchy" if len(parts) > 1
-                             else ("name" if cat else "no stocked/non-stocked "
-                                   "in the name"))])
+                            "category by %s, stocked by %s" % (cat_how, how)])
     print("Where each price list landed: %s" % apath)
     return path
 
