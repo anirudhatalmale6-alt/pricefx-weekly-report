@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v8 - 20 Sep"
+VERSION = "v9 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -80,6 +80,9 @@ def load_config():
         "password": c.get("password"),
         "threshold": float(c.get("vendor_threshold", "100000")),
         "out_dir": c.get("output_folder", HERE).strip(),
+        # Optional. Set it and the monthly file lands somewhere of its own;
+        # leave it out and monthly and weekly share one folder.
+        "month_out_dir": c.get("monthly_output_folder", "").strip() or None,
         "statuses": [x.strip() for x in
                      c.get("workflow_statuses", DEFAULT_STATUSES).split(",")
                      if x.strip()],
@@ -401,6 +404,8 @@ def main():
     if a.month is not None:
         start, end = month_bounds(a.month or None)
         label = "Month"
+        if cfg["month_out_dir"]:
+            cfg["out_dir"] = cfg["month_out_dir"]
     else:
         start, end = week_bounds(date.fromisoformat(a.week) if a.week else None)
         label = "Week"
