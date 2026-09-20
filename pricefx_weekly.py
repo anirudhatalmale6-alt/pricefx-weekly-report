@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v13 - 20 Sep"
+VERSION = "v14 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -442,25 +442,39 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
     be trusted without anyone reading a dropdown to me.
     """
     if candidates is None:
-        candidates = ["attribute%d" % i for i in range(1, 41)]
+        # VENDOR_FIELD is included deliberately as a positive control: it is
+        # known to work, so if even that comes back empty the probe itself is
+        # broken and "nothing matched" means nothing at all.
+        candidates = [VENDOR_FIELD]
+        for i in range(1, 41):
+            f = "attribute%d" % i
+            if f not in candidates:
+                candidates.append(f)
     known_plci = set(PLCI_PROBE)
-    cats, plcis = [], []
+    cats, plcis, populated, errors = [], [], [], 0
     for f in candidates:
-        if f == VENDOR_FIELD:
-            continue
         try:
             rows = rows_from(summarize(s, url, pl_id, f))
         except Exception:
+            errors += 1
             continue
         hits, seen = score_as_hierarchy(rows, f)
         if seen:
             cats.append((hits, seen, f))
+            sample = []
+            for r in rows:
+                v = r.get(f) if isinstance(r, dict) else None
+                if v not in (None, "") and str(v) not in sample:
+                    sample.append(str(v))
+                if len(sample) == 3:
+                    break
+            populated.append((f, seen, sample))
         phits, pseen = score_as_plci(rows, f, known_plci)
         if pseen:
             plcis.append((phits, pseen, f))
     cats.sort(key=lambda x: (-x[0], x[1]))
     plcis.sort(key=lambda x: (-x[0], x[1]))
-    return cats, plcis
+    return cats, plcis, populated, errors
 
 
 def classify_plci(rows, stocked, nonstocked):
@@ -688,8 +702,18 @@ def main():
             pid = some[0].get("id")
         print("\nTesting Group By against price list %s" % pid)
         print("Looking for the field whose values are your 22 categories.\n")
-        cats, plcis = find_hierarchy_field(s_sess, url, pid)
+        cats, plcis, populated, errors = find_hierarchy_field(s_sess, url, pid)
         lines = []
+        control = [p for p in populated if p[0] == VENDOR_FIELD]
+        print("Tried %d fields: %d came back with values, %d were rejected."
+              % (41, len(populated), errors))
+        if control:
+            print("Positive control: %s (Vendor Name) returned %d values, "
+                  "so the probe itself works.\n" % (VENDOR_FIELD, control[0][1]))
+        else:
+            print("Positive control FAILED: even %s returned nothing, so this "
+                  "price list has no data to group by. Try another one.\n"
+                  % VENDOR_FIELD)
 
         print("1st LEVEL HIERARCHY - looking for your 22 categories")
         if cats and cats[0][0] >= 2:
@@ -720,6 +744,13 @@ def main():
         else:
             print("Neither field was found on this price list. Try another:")
             print("    --find-hierarchy 4271")
+        if populated:
+            print("\nEvery field that DID return values, with a few examples.")
+            print("If one of these is your 1st level hierarchy or your PLCI,")
+            print("tell me its name - you do not need to send me the values.\n")
+            for f, seen, sample in populated:
+                print("  %-16s %3d values   e.g. %s"
+                      % (f, seen, ", ".join(x[:28] for x in sample)))
         print("\nThis price list may simply not contain every category or code.")
         return
 
