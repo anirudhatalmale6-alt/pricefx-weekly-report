@@ -294,7 +294,10 @@ def main():
             "Created By": p.get("createdByName"),
             "Submitted": p.get("submitDate"),
             "Calculated Annual Impact (000s)": round(sum(v for _, v in vend) / 1000.0, 1),
-            "Vendors over threshold": "; ".join("%s (%+,.0f)" % (n, v) for n, v in big),
+            # format(), not %-formatting: the thousands comma is not a valid
+            # flag in %f and raises ValueError the moment a vendor qualifies.
+            "Vendors over threshold": "; ".join(
+                "%s (%s)" % (n, format(v, "+,.0f")) for n, v in big),
         })
 
     if unknown_cols is not None:
