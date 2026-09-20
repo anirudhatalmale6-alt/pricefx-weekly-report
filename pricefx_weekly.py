@@ -246,8 +246,13 @@ def pick_vendor_key(sample):
 
 
 def thousands(v):
-    """206488 -> '+$206k'.  -133187 -> '-$133k'.  Nearest thousand."""
-    return "%s$%dk" % ("-" if v < 0 else "+", int(round(abs(v) / 1000.0)))
+    """206488 -> '+$206k'.  -133187 -> '($133k)'.  Nearest thousand.
+
+    Accounting notation, which is how he asked to read it: a rise carries the
+    plus, a fall is bracketed rather than signed.
+    """
+    k = int(round(abs(v) / 1000.0))
+    return "($%dk)" % k if v < 0 else "+$%dk" % k
 
 
 def rows_from(summary):
@@ -348,7 +353,7 @@ def main():
             "Submitted": p.get("submitDate"),
             "Calculated Annual Impact (000s)": round(sum(v for _, v in vend) / 1000.0, 1),
             "Vendors over threshold": "; ".join(
-                "%s (%s)" % (n, thousands(v)) for n, v in big),
+                "%s %s" % (n, thousands(v)) for n, v in big),
         })
 
     if unknown_cols is not None:
