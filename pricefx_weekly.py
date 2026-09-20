@@ -33,6 +33,17 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
 VENDOR_FIELD = "attribute19"
 
+# Which workflow statuses count as done. NO_APPROVAL_REQUIRED is not an
+# oversight on the part of whoever submitted it - it means the list went live
+# without needing a sign-off, so it belongs in the week's figures exactly like
+# an APPROVED one. Overridable in pricefx_config.ini, because guessing at a
+# status spelling is how a price list goes missing without anyone noticing.
+DEFAULT_STATUSES = "APPROVED, NO_APPROVAL_REQUIRED"
+
+# Where a price list's status might live in the fetch reply, in the order the
+# names should be trusted.
+STATUS_FIELDS = ("workflowStatus", "approvalStatus", "status")
+
 # The nine things the Summary screen totals. Only SKU Impact is used below, but
 # asking for the same set keeps the call identical to the one the UI makes.
 PROJECTIONS = [
@@ -62,6 +73,9 @@ def load_config():
         "password": c.get("password"),
         "threshold": float(c.get("vendor_threshold", "100000")),
         "out_dir": c.get("output_folder", HERE).strip(),
+        "statuses": [x.strip() for x in
+                     c.get("workflow_statuses", DEFAULT_STATUSES).split(",")
+                     if x.strip()],
     }
 
 
@@ -94,31 +108,13 @@ def post(s, url, path, body=None, params=None):
     return r.json()
 
 
-def approved_status_values(s, url):
-    """Ask PriceFx what its workflow statuses are actually called.
-
-    Hardcoding "APPROVED" is a guess, and a wrong guess here returns an empty
-    week that looks exactly like a quiet week. So read the list and match
-    anything containing 'approv'.
-    """
-    try:
-        d = post(s, url, "/configurationmanager.get/availableWorkStatus",
-                 params={"dataLocale": "en"})
-    except Exception:
-        return ["APPROVED"]
-    found = []
-
-    def walk(o):
-        if isinstance(o, dict):
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
-        elif isinstance(o, str) and "approv" in o.lower():
-            found.append(o)
-    walk(d)
-    return sorted(set(found)) or ["APPROVED"]
+def status_of(row):
+    """This price list's workflow status, whatever the reply calls the field."""
+    for want in STATUS_FIELDS:
+        k = find_key(row, want)
+        if k and row.get(k) not in (None, ""):
+            return str(row[k]).strip()
+    return ""
 
 
 def week_bounds(anchor=None):
@@ -139,15 +135,19 @@ def week_bounds(anchor=None):
             datetime.combine(end, time(23, 59, 59)))
 
 
-def fetch_price_lists(s, url, start, end, statuses):
-    """Approved price lists submitted inside the week - filtered server-side."""
+def fetch_price_lists(s, url, start, end):
+    """Every price list submitted inside the week. Date filtered server-side.
+
+    The status filter used to be part of this query too. It is not any more: a
+    server-side status filter can only return what it was asked for, so a list
+    with a status I had not thought of - NO_APPROVAL_REQUIRED, as it turned out -
+    vanished with nothing to show it had ever existed. Fetching the whole week
+    and choosing in Python costs one extra field per row and means anything left
+    out can be named and written down.
+    """
     crit = {
         "_constructor": "AdvancedCriteria", "operator": "and",
         "criteria": [
-            {"_constructor": "AdvancedCriteria", "operator": "or",
-             "criteria": [{"fieldName": "workflowStatus", "operator": "equals",
-                           "value": v, "_constructor": "AdvancedCriteria"}
-                          for v in statuses]},
             {"fieldName": "submitDate", "operator": "greaterOrEqual",
              "value": start.strftime("%Y-%m-%dT%H:%M:%S"),
              "_constructor": "AdvancedCriteria"},
@@ -308,11 +308,18 @@ def main():
     s, url = connect(cfg)
     print("Signed in to %s as %s" % (cfg["partition"], cfg["account"]))
 
-    statuses = approved_status_values(s, url)
-    print("Treating these workflow statuses as approved: %s" % ", ".join(statuses))
+    print("Counting these workflow statuses: %s" % ", ".join(cfg["statuses"]))
 
-    pls = fetch_price_lists(s, url, start, end, statuses)
-    print("Approved price lists submitted in the week: %d" % len(pls))
+    everything = fetch_price_lists(s, url, start, end)
+    wanted = set(_norm(x) for x in cfg["statuses"])
+    pls = [p for p in everything if _norm(status_of(p)) in wanted]
+    left_out = [p for p in everything if _norm(status_of(p)) not in wanted]
+
+    print("Price lists submitted in the week: %d" % len(everything))
+    print("Counted: %d.  Left out: %d." % (len(pls), len(left_out)))
+    if left_out:
+        seen = sorted(set(status_of(p) or "(blank)" for p in left_out))
+        print("Statuses left out: %s" % ", ".join(seen))
 
     if a.check:
         for p in pls[:5]:
@@ -362,7 +369,32 @@ def main():
         print("   " + ", ".join(sorted(unknown_cols)))
 
     write_columns_note(first_row, cfg["out_dir"])
+    write_excluded_note(left_out, cfg["out_dir"])
     write_report(report, start, end, cfg["out_dir"])
+
+
+def write_excluded_note(left_out, out_dir):
+    """Name every price list the status filter dropped, and why.
+
+    The point is that a missing price list should never again be invisible. If
+    a status belongs in the report, its spelling is already written down here
+    and goes straight into workflow_statuses in the ini - no hunting.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "price_lists_left_out.txt")
+    with open(path, "w", encoding="utf-8") as fh:
+        if not left_out:
+            fh.write("Nothing was left out - every price list submitted in the "
+                     "week had a counted status.\n")
+            return
+        fh.write("Price lists submitted in the week but NOT counted, and the "
+                 "status that excluded them.\n")
+        fh.write("If one of these statuses should count, add it to "
+                 "workflow_statuses in pricefx_config.ini.\n\n")
+        for p in sorted(left_out, key=lambda r: str(r.get("id"))):
+            fh.write("  %-8s %-45s %s\n" % (p.get("id"),
+                                            str(p.get("label"))[:45],
+                                            status_of(p) or "(blank)"))
 
 
 def write_columns_note(sample, out_dir):

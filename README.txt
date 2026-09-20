@@ -2,12 +2,21 @@ PriceFx weekly approved price list report
 =========================================
 
 WHAT IT DOES
-  Asks PriceFx for price lists that are approved AND were submitted inside one
-  Sunday-to-Saturday week, then for each one runs the same Summary/Calculate
-  the screen runs, and writes a CSV with your columns plus the vendors whose
-  SKU Impact is beyond +/-100,000.
+  Asks PriceFx for every price list submitted inside one Sunday-to-Saturday
+  week, keeps the ones whose workflow status counts, then for each one runs the
+  same Summary/Calculate the screen runs, and writes a CSV with your columns
+  plus the vendors whose SKU Impact is beyond +/-100,000.
 
   It reads. It never writes anything back to PriceFx.
+
+WHICH PRICE LISTS COUNT
+  By default APPROVED and NO_APPROVAL_REQUIRED. Change that with
+  workflow_statuses in pricefx_config.ini - spelling and case do not matter.
+
+  Anything submitted in the week that did NOT count is named, with the status
+  that excluded it, in price_lists_left_out.txt next to the report. That file is
+  the point: a price list can no longer go missing quietly. If one of the
+  statuses listed there should be counted, copy it into workflow_statuses.
 
 SETUP  (once)
   1. pip install requests
@@ -37,18 +46,25 @@ THE WEEK
   Seconds are included deliberately. 12:01am would leave a minute at midnight
   that belongs to no week at all, and a price list submitted in it would vanish.
 
-WHAT I COULD NOT TEST
-  I have no PriceFx access and did not want yours, so the logic is tested but
-  the live calls are not. Two things could need a small fix on first run:
+FILES IT WRITES, BESIDES THE REPORT
+  price_lists_left_out.txt   every price list in the week that did not count,
+                             and the status that excluded it
+  summary_columns.txt        what the Summary reply calls its columns, names
+                             and types only - no figures, no vendor names
 
-  - the exact workflow status wording. Rather than assume "APPROVED", it asks
-    PriceFx what its statuses are called and matches anything containing
-    "approv". --check prints what it chose, so you can see it is right.
+  Both exist so that if something looks wrong, the answer is already written
+  down instead of costing a round of screenshots. Neither contains anything
+  commercial, so either can be sent on.
 
-  - the column name for SKU Impact in the reply. The capture showed what the
-    browser sends, not what comes back. It looks for any column whose name
-    matches, and if it cannot find one it prints the columns it did get and
-    tells you, rather than silently reporting zero impact.
+NOTES FROM THE FIRST LIVE RUNS
+  - The status filter used to run server-side, which meant a status I had not
+    thought of returned nothing and left no trace. It now fetches the whole
+    week and chooses in Python, so anything skipped gets named.
 
-  That second one is why --check exists. If it prints a list of columns and
-  asks which is which, send me that line and it is a one-word fix.
+  - The vendor column is found by the shape of its value - the one piece of
+    text in a row of numbers - rather than by guessing its name, because the
+    reply does not call it what the request does.
+
+  I have no PriceFx access and did not want yours, so the live calls are
+  exercised by you and the logic is exercised here against a rebuilt copy of a
+  week's replies.
