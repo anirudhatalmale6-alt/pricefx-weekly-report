@@ -223,26 +223,75 @@ def looks_numeric(v):
         return False
 
 
-def pick_vendor_key(sample):
-    """Which key in a summarize row carries the vendor name.
+def pick_vendor_key(rows):
+    """Which key in the summarize rows carries the vendor name.
 
     By name first. If the reply calls it something I have not seen, fall back on
-    the SHAPE of the value: the row is a vendor label plus nine totals, so the
-    vendor is the only piece of text in it that is not a number. That works
-    whatever the key happens to be called, which guessing at names does not.
+    the SHAPE of the value: a row is a vendor label plus nine totals, so the
+    vendor is the only text in it that is not a number. That holds whatever the
+    key is called, which guessing at names does not.
+
+    Scored across ALL the rows, not just the first, because the first row is
+    often the grand total and its vendor cell is blank - judging by that one row
+    alone would rule the real vendor column out.
     """
-    k = find_key(sample, VENDOR_FIELD, "vendorName", "vendor name", "vendor",
+    if isinstance(rows, dict):
+        rows = [rows]
+    rows = [r for r in rows if isinstance(r, dict)]
+    if not rows:
+        return None
+
+    k = find_key(rows[0], VENDOR_FIELD, "vendorName", "vendor name", "vendor",
                  "productAttribute19", "attribute19")
     if k:
         return k
-    for k2, v in sample.items():
+
+    keys = []
+    for r in rows:
+        for k2 in r:
+            if k2 not in keys:
+                keys.append(k2)
+    best, best_score = None, 0
+    for k2 in keys:
         if _norm(k2) in METRIC_NAMES:
             continue
-        if v is None or looks_numeric(v):
-            continue
-        if isinstance(v, str) and v.strip():
-            return k2
-    return None
+        score = 0
+        for r in rows:
+            v = r.get(k2)
+            if isinstance(v, str) and v.strip() and not looks_numeric(v):
+                score += 1
+        if score > best_score:
+            best, best_score = k2, score
+    return best
+
+
+# What a grand-total row calls itself, if it calls itself anything.
+TOTAL_LABELS = set(["", "total", "grandtotal", "total", "all", "sum", "novendor"])
+
+
+def drop_grand_total(rows):
+    """Remove the summary row the reply carries alongside the vendors.
+
+    The Summary reply returns a grand total as well as one row per vendor. Left
+    in, it DOUBLES the annual impact and shows up in the vendor list as a
+    phantom vendor whose number is the whole price list - which is exactly what
+    Pratik spotted on 4278: (261,701) next to the real (261,345).
+
+    It is identified by what makes it a total - its value equals the sum of
+    every other row - rather than by its label, which is blank here but need not
+    stay that way.
+    """
+    if len(rows) < 2:
+        return rows
+    total = sum(v for _, v in rows)
+    tol = max(1.0, abs(total) * 1e-6)
+    candidates = [i for i, (_, v) in enumerate(rows)
+                  if abs(v - (total - v)) <= tol]
+    if not candidates:
+        return rows
+    labelled = [i for i in candidates if _norm(rows[i][0]) in TOTAL_LABELS]
+    drop = labelled[0] if labelled else candidates[0]
+    return [r for i, r in enumerate(rows) if i != drop]
 
 
 def thousands(v):
@@ -276,7 +325,7 @@ def vendor_impacts(summary):
     if not rows or not isinstance(rows[0], dict):
         return [], None
     sample = rows[0]
-    vkey = pick_vendor_key(sample)
+    vkey = pick_vendor_key(rows)
     ikey = find_key(sample, "SKU Impact", "skuImpact", "sum_SKU_Impact")
     if not ikey:
         return [], sample
@@ -289,7 +338,7 @@ def vendor_impacts(summary):
         name = r.get(vkey) if vkey else None
         name = str(name).strip() if name not in (None, "") else "(no vendor)"
         out.append((name, val))
-    return out, None
+    return drop_grand_total(out), None
 
 
 def main():
