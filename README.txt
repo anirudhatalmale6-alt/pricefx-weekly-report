@@ -39,6 +39,16 @@ RUNNING
   python pricefx_weekly.py --week 2026-09-20
       A specific week, given the Sunday it starts.
 
+  python pricefx_weekly.py --month
+      A whole calendar month instead of a week - the month that has just
+      finished. Run it any time in October and you get all of September.
+
+  python pricefx_weekly.py --month 2026-08
+      A specific month.
+
+  The last day of the month is worked out, not assumed to be the 31st, so
+  30-day months and February are right.
+
 THE WEEK
   Run any day, it reports the last week that has FINISHED. Run on Sunday 27 Sep
   and you get Sunday 20 Sep 00:00:00 to Saturday 26 Sep 23:59:59.

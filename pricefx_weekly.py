@@ -12,10 +12,12 @@ summarize - which returns SKU Impact already totalled per vendor.
 
 Nothing is written back to PriceFx. Every call here reads.
 
-    python pricefx_weekly.py                 last full Sun-Sat week
-    python pricefx_weekly.py --week 2026-09-14    the week starting that Sunday
-    python pricefx_weekly.py --check         prove the login and filters work,
-                                             write nothing
+    python pricefx_weekly.py                    last full Sun-Sat week
+    python pricefx_weekly.py --week 2026-09-14  the week starting that Sunday
+    python pricefx_weekly.py --month            the month that just finished
+    python pricefx_weekly.py --month 2026-08    that calendar month
+    python pricefx_weekly.py --check            prove the login and filters
+                                                work, write nothing
 """
 import argparse
 import base64
@@ -32,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v7 - 20 Sep"
+VERSION = "v8 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -136,6 +138,29 @@ def week_bounds(anchor=None):
         today = date.today()
         start = today - timedelta(days=(today.weekday() + 1) % 7 + 7)
     end = start + timedelta(days=6)
+    return (datetime.combine(start, time(0, 0, 0)),
+            datetime.combine(end, time(23, 59, 59)))
+
+
+def month_bounds(anchor=None):
+    """A whole calendar month, the 1st 00:00:00 to the last day 23:59:59.
+
+    The last day is worked out, not assumed to be the 31st - otherwise every
+    30-day month would quietly lose its last day and February would lose three.
+
+    With no anchor it does the month that has FINISHED, so running it any time
+    in October gives you the whole of September.
+    """
+    if anchor:
+        bits = str(anchor).split("-")
+        y, m = int(bits[0]), int(bits[1])
+    else:
+        today = date.today()
+        y, m = (today.year, today.month - 1) if today.month > 1 \
+            else (today.year - 1, 12)
+    start = date(y, m, 1)
+    following = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    end = following - timedelta(days=1)
     return (datetime.combine(start, time(0, 0, 0)),
             datetime.combine(end, time(23, 59, 59)))
 
@@ -360,18 +385,28 @@ def vendor_impacts(summary):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--week", help="Sunday the week starts, YYYY-MM-DD")
+    ap.add_argument("--month", nargs="?", const="", metavar="YYYY-MM",
+                    help="a whole calendar month instead of a week. "
+                         "Bare --month does the month that has just finished")
     ap.add_argument("--check", action="store_true",
                     help="prove login and filters work, write nothing")
     a = ap.parse_args()
+    if a.week and a.month is not None:
+        sys.exit("Use --week or --month, not both.")
 
     print("pricefx_weekly %s" % VERSION)
     print("Running: %s" % os.path.abspath(__file__))
 
     cfg = load_config()
-    anchor = date.fromisoformat(a.week) if a.week else None
-    start, end = week_bounds(anchor)
-    print("Week: %s to %s" % (start.strftime("%a %d %b %H:%M:%S"),
-                              end.strftime("%a %d %b %H:%M:%S")))
+    if a.month is not None:
+        start, end = month_bounds(a.month or None)
+        label = "Month"
+    else:
+        start, end = week_bounds(date.fromisoformat(a.week) if a.week else None)
+        label = "Week"
+    print("%s: %s to %s" % (label,
+                            start.strftime("%a %d %b %Y %H:%M:%S"),
+                            end.strftime("%a %d %b %Y %H:%M:%S")))
 
     s, url = connect(cfg)
     print("Signed in to %s as %s" % (cfg["partition"], cfg["account"]))
