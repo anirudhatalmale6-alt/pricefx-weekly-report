@@ -29,6 +29,11 @@ import requests
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "pricefx_config.ini")
 
+# Printed on the first line of every run. If this is not the version you were
+# told to expect, the file you downloaded is not the file that just ran - which
+# has happened, and cost an evening of chasing bugs that were already fixed.
+VERSION = "v6 - 20 Sep"
+
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
 VENDOR_FIELD = "attribute19"
@@ -348,6 +353,9 @@ def main():
                     help="prove login and filters work, write nothing")
     a = ap.parse_args()
 
+    print("pricefx_weekly %s" % VERSION)
+    print("Running: %s" % os.path.abspath(__file__))
+
     cfg = load_config()
     anchor = date.fromisoformat(a.week) if a.week else None
     start, end = week_bounds(anchor)
@@ -386,15 +394,15 @@ def main():
         print("\nCheck only - nothing written.")
         return
 
-    report, unknown_cols, first_row = [], None, None
+    report, unknown_cols, first_rows = [], None, None
     for i, p in enumerate(pls, 1):
         pid = p.get("id")
         print("  [%d/%d] price list %s" % (i, len(pls), pid))
         summary = summarize(s, url, pid)
-        if first_row is None:
+        if first_rows is None:
             got = rows_from(summary)
             if got and isinstance(got[0], dict):
-                first_row = got[0]
+                first_rows = got
         vend, unknown = vendor_impacts(summary)
         if unknown is not None and unknown_cols is None:
             unknown_cols = unknown
@@ -417,56 +425,85 @@ def main():
               "so those impacts are zero. Columns returned were:")
         print("   " + ", ".join(sorted(unknown_cols)))
 
-    write_columns_note(first_row, cfg["out_dir"])
-    write_excluded_note(left_out, cfg["out_dir"])
+    write_diagnostic(cfg, start, end, everything, pls, left_out, first_rows)
     write_report(report, start, end, cfg["out_dir"])
 
 
-def write_excluded_note(left_out, out_dir):
-    """Name every price list the status filter dropped, and why.
+def write_diagnostic(cfg, start, end, everything, kept, left_out, sum_rows):
+    """One file that answers every question I would otherwise have to ask.
 
-    The point is that a missing price list should never again be invisible. If
-    a status belongs in the report, its spelling is already written down here
-    and goes straight into workflow_statuses in the ini - no hunting.
+    Deliberately carries NO vendor names and NO money: price list ids, workflow
+    statuses, and the NAMES and TYPES of the reply's columns. That is enough to
+    diagnose anything seen so far, and nothing in it is commercial, so it can be
+    sent on without a second thought.
+
+    It exists because three rounds of screenshots were spent on questions this
+    file answers in one run.
     """
+    out_dir = cfg["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "price_lists_left_out.txt")
+    path = os.path.join(out_dir, "diagnostic.txt")
     with open(path, "w", encoding="utf-8") as fh:
-        if not left_out:
-            fh.write("Nothing was left out - every price list submitted in the "
-                     "week had a counted status.\n")
-            return
-        fh.write("Price lists submitted in the week but NOT counted, and the "
-                 "status that excluded them.\n")
-        fh.write("If one of these statuses should count, add it to "
-                 "workflow_statuses in pricefx_config.ini.\n\n")
-        for p in sorted(left_out, key=lambda r: str(r.get("id"))):
-            fh.write("  %-8s %-45s %s\n" % (p.get("id"),
-                                            str(p.get("label"))[:45],
-                                            status_of(p) or "(blank)"))
+        fh.write("pricefx_weekly %s\n" % VERSION)
+        fh.write("script: %s\n" % os.path.abspath(__file__))
+        fh.write("week:   %s to %s\n" % (start, end))
+        fh.write("counting statuses: %s\n\n" % ", ".join(cfg["statuses"]))
 
+        fh.write("PRICE LISTS THE WEEK FETCH RETURNED: %d\n" % len(everything))
+        fh.write("  counted %d, left out %d\n\n" % (len(kept), len(left_out)))
 
-def write_columns_note(sample, out_dir):
-    """Record what the summarize reply calls its columns.
+        tally = {}
+        for p in everything:
+            st = status_of(p) or "(no status field found)"
+            tally[st] = tally.get(st, 0) + 1
+        fh.write("Every status seen this week, and how many had it:\n")
+        for st in sorted(tally):
+            fh.write("  %-34s %d\n" % (st, tally[st]))
 
-    Names and types only - no figures and no vendor names - so it can be sent
-    on without passing anything commercial around. It exists so that if the
-    vendor column is ever read wrongly, the answer is already written down
-    instead of costing another round of screenshots.
-    """
-    if not sample:
-        return
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "summary_columns.txt")
-    chosen = pick_vendor_key(sample)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("Columns in the summarize reply (names and types only).\n")
-        fh.write("Vendor name was read from: %s\n\n" % (chosen or "NOTHING - not found"))
-        for k in sample:
-            fh.write("  %-40s %s%s\n" % (
-                k,
-                "number" if looks_numeric(sample[k]) else type(sample[k]).__name__,
-                "   <- used as the vendor name" if k == chosen else ""))
+        fh.write("\nEvery price list id returned, with its status and whether\n"
+                 "it was counted. If an id you expected is NOT in this list at\n"
+                 "all, the week filter never saw it and the problem is the\n"
+                 "submitted date, not the status.\n\n")
+        keptids = set(id(x) for x in kept)
+        for p in sorted(everything, key=lambda r: str(r.get("id"))):
+            fh.write("  %-8s %-24s %s\n" % (
+                p.get("id"),
+                (status_of(p) or "(blank)")[:24],
+                "counted" if id(p) in keptids else "LEFT OUT"))
+
+        fh.write("\nFIELDS ON A PRICE LIST ROW (names and types only):\n")
+        if everything:
+            for k in sorted(everything[0]):
+                fh.write("  %-34s %s\n" % (k, type(everything[0][k]).__name__))
+
+        fh.write("\nTHE SUMMARY REPLY for the first price list:\n")
+        if not sum_rows:
+            fh.write("  no rows came back at all\n")
+        else:
+            chosen = pick_vendor_key(sum_rows)
+            fh.write("  rows returned: %d\n" % len(sum_rows))
+            fh.write("  vendor name read from: %s\n" %
+                     (chosen or "NOTHING - no column matched"))
+            if chosen:
+                blank = sum(1 for r in sum_rows
+                            if r.get(chosen) in (None, "")
+                            or not str(r.get(chosen)).strip())
+                fh.write("  rows with that column blank: %d "
+                         "(a grand total row shows up here)\n" % blank)
+            keys = []
+            for r in sum_rows:
+                for k in r:
+                    if k not in keys:
+                        keys.append(k)
+            fh.write("\n  columns:\n")
+            for k in keys:
+                kinds = sorted(set(
+                    "number" if looks_numeric(r.get(k)) else type(r.get(k)).__name__
+                    for r in sum_rows))
+                fh.write("    %-34s %s%s\n" % (
+                    k, "/".join(kinds),
+                    "   <- used as the vendor name" if k == chosen else ""))
+    print("Diagnostic written to %s" % path)
 
 
 def write_report(rows, start, end, out_dir):

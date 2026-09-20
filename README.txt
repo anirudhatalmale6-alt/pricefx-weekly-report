@@ -47,14 +47,18 @@ THE WEEK
   that belongs to no week at all, and a price list submitted in it would vanish.
 
 FILES IT WRITES, BESIDES THE REPORT
-  price_lists_left_out.txt   every price list in the week that did not count,
-                             and the status that excluded it
-  summary_columns.txt        what the Summary reply calls its columns, names
-                             and types only - no figures, no vendor names
+  diagnostic.txt   every price list id the week returned, its workflow status,
+                   whether it was counted, and the NAMES and TYPES of the
+                   columns in both replies.
 
-  Both exist so that if something looks wrong, the answer is already written
-  down instead of costing a round of screenshots. Neither contains anything
-  commercial, so either can be sent on.
+  It carries no vendor names and no money, so it can be sent on without a
+  second thought, and it answers in one run the questions that otherwise cost
+  a round of screenshots each.
+
+VERSION
+  The first line of every run prints the version and the full path of the file
+  that is actually running. If that version is not the one you were told to
+  expect, the file you downloaded is not the file that ran.
 
 NOTES FROM THE FIRST LIVE RUNS
   - The status filter used to run server-side, which meant a status I had not
