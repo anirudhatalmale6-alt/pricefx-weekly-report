@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v9 - 20 Sep"
+VERSION = "v10 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -50,6 +50,45 @@ DEFAULT_STATUSES = "APPROVED, NO_APPROVAL_REQUIRED"
 # Where a price list's status might live in the fetch reply, in the order the
 # names should be trusted.
 STATUS_FIELDS = ("workflowStatus", "approvalStatus", "status")
+
+# The 1st level hierarchy, exactly as the CategorySummary sheet spells it. The
+# analysts name their price lists after these, which is how a price list gets
+# attributed - "the way i identify today is by the description name".
+CATEGORIES = [
+    "Circuit Breakers, Fuses & Protection",
+    "Connectors",
+    "Electronic Components",
+    "Enclosures, Racks & Cabinets",
+    "Facilities, Cleaning & Maintenance",
+    "Fans & Thermal Management",
+    "Industrial Controls",
+    "Industrial Data Communications",
+    "Lighting & Indication",
+    "Mechanical Power Transmission",
+    "Motors & Motor Controls",
+    "PLCs & HMIs",
+    "Pneumatics & Fluid Control",
+    "Power Products",
+    "Raspberry Pi, Arduino & Development Tools",
+    "Relays",
+    "Sensors",
+    "Switches",
+    "Test & Measurement",
+    "Tools & Hardware",
+    "Uncategorized",
+    "Wire & Cable",
+]
+
+# Short forms the analysts actually type. Add to this rather than renaming a
+# price list.
+CATEGORY_ALIASES = {
+    "FCM": "Facilities, Cleaning & Maintenance",
+    "Uncat": "Uncategorized",
+    "PLCs And HMIs": "PLCs & HMIs",
+}
+
+CROSS = "Notable Cross Category"
+OVERRIDES = os.path.join(HERE, "category_overrides.csv")
 
 # The nine things the Summary screen totals. Only SKU Impact is used below, but
 # asking for the same set keeps the call identical to the one the UI makes.
@@ -327,6 +366,91 @@ def drop_grand_total(rows):
     return [r for i, r in enumerate(rows) if i != drop]
 
 
+def cat_norm(x):
+    """Normalise for matching. '&' becomes 'and' because the sheet writes
+    'PLCs & HMIs' where the analyst types 'PLCs And HMIs'."""
+    x = str(x).lower().replace("&", " and ")
+    return "".join(ch for ch in x if ch.isalnum())
+
+
+def load_overrides():
+    """price list id or name -> (category, stocked) decided by hand.
+
+    The name rule gets most of them, but it cannot get all of them and it never
+    will. A price list whose name says one category is sometimes filed under
+    Notable Cross Category instead, because that is a judgement about what the
+    work actually covered, not something a name can carry. This file is where
+    that judgement lives.
+
+    category_overrides.csv, next to the script:
+        price_list,category,stock
+        4321,Notable Cross Category,
+        Vendor List V2,Notable Cross Category,
+        PLCs And HMIs Stock and NonStock,PLCs & HMIs,Stocked
+    """
+    out = {}
+    if not os.path.exists(OVERRIDES):
+        return out
+    import csv
+    with open(OVERRIDES, newline="", encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            key = cat_norm(row.get("price_list") or "")
+            if not key:
+                continue
+            out[key] = ((row.get("category") or "").strip(),
+                        (row.get("stock") or "").strip())
+    return out
+
+
+def category_of(pid, name, overrides):
+    """Which 1st level category this price list belongs to, or None for cross.
+
+    Longest match wins, so 'Industrial Data Communications' beats nothing and
+    'Connectors' does not swallow a longer name that starts the same way.
+    """
+    for key in (cat_norm(pid), cat_norm(name)):
+        if key in overrides and overrides[key][0]:
+            got = overrides[key][0]
+            return None if cat_norm(got) == cat_norm(CROSS) else got
+    n = cat_norm(name)
+    best, blen = None, -1
+    for alias, canonical in CATEGORY_ALIASES.items():
+        a = cat_norm(alias)
+        if n.startswith(a) and len(a) > blen:
+            best, blen = canonical, len(a)
+    for c in CATEGORIES:
+        cn = cat_norm(c)
+        # tolerate singular/plural: 'Electronic Component - NonStocked' is
+        # 'Electronic Components'
+        for cand in set([cn, cn[:-1] if cn.endswith("s") else cn]):
+            if cand and n.startswith(cand) and len(cand) > blen:
+                best, blen = c, len(cand)
+    return best
+
+
+def stock_of(pid, name, overrides):
+    """Stocked, Non-Stocked, or unspecified - read off the name."""
+    for key in (cat_norm(pid), cat_norm(name)):
+        if key in overrides and overrides[key][1]:
+            return overrides[key][1]
+    n = cat_norm(name)
+    if "nonstock" in n:
+        return "Non-Stocked"
+    if "stock" in n:
+        return "Stocked"
+    return "unspecified"
+
+
+def money_k(v):
+    """The sheet's money format: $100k, $(250)k, $(1,000)k, $0k.
+
+    Thousands, a bracketed loss rather than a signed one, and a thousands
+    separator inside the brackets.
+    """
+    s = "{:,.0f}".format(abs(v) / 1000.0)
+    return "$(%s)k" % s if v < 0 else "$%sk" % s
+
+
 def thousands_cell(v):
     """Column G in thousands, accounting style: a loss is bracketed, not signed.
 
@@ -445,7 +569,8 @@ def main():
         print("\nCheck only - nothing written.")
         return
 
-    report, unknown_cols, first_rows = [], None, None
+    overrides = load_overrides()
+    report, unknown_cols, first_rows, entries = [], None, None, []
     for i, p in enumerate(pls, 1):
         pid = p.get("id")
         print("  [%d/%d] price list %s" % (i, len(pls), pid))
@@ -459,6 +584,10 @@ def main():
             unknown_cols = unknown
         big = [(n, v) for n, v in vend if abs(v) >= cfg["threshold"]]
         big.sort(key=lambda x: -abs(x[1]))
+        label = p.get("label")
+        entries.append((pid, label, sum(v for _, v in vend),
+                        category_of(pid, label, overrides),
+                        stock_of(pid, label, overrides)))
         report.append({
             "Price List Number": pid,
             "Price List Name": p.get("label"),
@@ -479,6 +608,87 @@ def main():
 
     write_diagnostic(cfg, start, end, everything, pls, left_out, first_rows)
     write_report(report, start, end, cfg["out_dir"])
+    write_category_summary(entries, start, end, cfg["out_dir"])
+
+
+def build_category_summary(entries):
+    """entries: [(pid, name, total_impact)] -> (rows, cross, grand_total).
+
+    rows is [(category, summary string)] in the sheet's own order, so it can be
+    pasted straight down column B. cross is the Notable Cross Category line.
+    """
+    buckets, cross_names, cross_total = {}, [], 0.0
+    for pid, name, total, cat, stock in entries:
+        if cat is None:
+            cross_names.append(str(name))
+            cross_total += total
+            continue
+        b = buckets.setdefault(cat, {"Stocked": 0.0, "Non-Stocked": 0.0,
+                                     "unspecified": 0.0})
+        b[stock] += total
+
+    # EVERY category, in the sheet's own order, including the ones with no
+    # activity. His sheet has a fixed row per category, so a short list would
+    # paste out of alignment and quietly put figures against the wrong name.
+    rows = []
+    for c in CATEGORIES:
+        b = buckets.get(c, {"Stocked": 0.0, "Non-Stocked": 0.0,
+                            "unspecified": 0.0})
+        if b["Stocked"] == 0 and b["Non-Stocked"] == 0 and b["unspecified"]:
+            # his own convention for a category with no split - "Total - $20k"
+            rows.append((c, "Total - %s" % money_k(b["unspecified"])))
+            continue
+        line = "Stocked %s, Non-Stocked - %s" % (money_k(b["Stocked"]),
+                                                 money_k(b["Non-Stocked"]))
+        if b["unspecified"]:
+            line += ", Other - %s" % money_k(b["unspecified"])
+        rows.append((c, line))
+
+    cross = ""
+    if cross_names:
+        cross = "%s - $%s K" % (",".join(cross_names),
+                                "{:,.0f}".format(abs(cross_total) / 1000.0))
+        if cross_total < 0:
+            cross = "%s - $(%s) K" % (",".join(cross_names),
+                                      "{:,.0f}".format(abs(cross_total) / 1000.0))
+    grand = sum(t for _, _, t, _, _ in entries)
+    return rows, cross, grand
+
+
+def write_category_summary(entries, start, end, out_dir):
+    import csv
+    os.makedirs(out_dir, exist_ok=True)
+    rows, cross, grand = build_category_summary(entries)
+
+    path = os.path.join(out_dir, "category_summary_%s_to_%s.csv"
+                        % (start.date(), end.date()))
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["Annual Impact = $%s K" % "{:,.0f}".format(grand / 1000.0), ""])
+        w.writerow(["1st Level", "Summary"])
+        for c, line in rows:
+            w.writerow([c, line])
+        if cross:
+            w.writerow([])
+            w.writerow([CROSS, cross])
+    print("\nAnnual Impact = $%s K" % "{:,.0f}".format(grand / 1000.0))
+    print("Category summary written to %s" % path)
+
+    # Every price list and where it landed. Without this the attribution is
+    # invisible, and a price list in the wrong category is the kind of thing
+    # nobody notices in a summary.
+    apath = os.path.join(out_dir, "category_assignment_%s_to_%s.csv"
+                         % (start.date(), end.date()))
+    with open(apath, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["Price List Number", "Price List Name", "Impact (000s)",
+                    "1st Level", "Stocked / Non-Stocked", "How it was decided"])
+        for pid, name, total, cat, stock in entries:
+            w.writerow([pid, name, round(total / 1000.0, 1),
+                        cat or CROSS, stock,
+                        "name" if cat else "no category in the name"])
+    print("Where each price list landed: %s" % apath)
+    return path
 
 
 def write_diagnostic(cfg, start, end, everything, kept, left_out, sum_rows):

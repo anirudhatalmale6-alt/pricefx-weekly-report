@@ -56,6 +56,32 @@ THE WEEK
   Seconds are included deliberately. 12:01am would leave a minute at midnight
   that belongs to no week at all, and a price list submitted in it would vanish.
 
+THE CATEGORY SUMMARY  (written on every run)
+  category_summary_<from>_to_<to>.csv
+      The CategorySummary block, ready to paste. Every 1st level category in
+      your sheet's order - including the ones with no activity, so the paste
+      lines up with your fixed rows - plus the Annual Impact line and the
+      Notable Cross Category line.
+
+  category_assignment_<from>_to_<to>.csv
+      Every price list and which category it landed in. Check this one.
+
+  A price list is attributed by its description name, the way you do it now.
+  Anything whose name carries no category falls into Notable Cross Category -
+  a vendor-named list, an initiative name, a part-number list, and so on.
+
+  WHEN THE NAME IS WRONG: category_overrides.csv, next to the script.
+
+      price_list,category,stock
+      4321,Notable Cross Category,
+      Vendor List V2,Notable Cross Category,
+      PLCs And HMIs Stock and NonStock,PLCs & HMIs,Stocked
+
+  First column is the price list number or its name. Leave stock blank to keep
+  what the name says. This is where a judgement call lives: a list whose name
+  says one category sometimes belongs under Notable Cross Category instead,
+  and no rule can know that from the name.
+
 FILES IT WRITES, BESIDES THE REPORT
   diagnostic.txt   every price list id the week returned, its workflow status,
                    whether it was counted, and the NAMES and TYPES of the
