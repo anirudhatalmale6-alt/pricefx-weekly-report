@@ -32,7 +32,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v6 - 20 Sep"
+VERSION = "v7 - 20 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -299,6 +299,17 @@ def drop_grand_total(rows):
     return [r for i, r in enumerate(rows) if i != drop]
 
 
+def thousands_cell(v):
+    """Column G in thousands, accounting style: a loss is bracketed, not signed.
+
+    A positive stays a real number so Excel can still sum and sort the column.
+    A negative has to go out as text to carry the brackets - Excel reads
+    "(261.7)" back as -261.7, which is the whole point of the notation.
+    """
+    k = round(abs(v) / 1000.0, 1)
+    return "(%s)" % k if v < 0 else k
+
+
 def thousands(v):
     """206488 -> '+$206k'.  -133187 -> '($133k)'.  Nearest thousand.
 
@@ -415,7 +426,8 @@ def main():
             "Missing Resale Price": "",
             "Created By": p.get("createdByName"),
             "Submitted": p.get("submitDate"),
-            "Calculated Annual Impact (000s)": round(sum(v for _, v in vend) / 1000.0, 1),
+            "Calculated Annual Impact (000s)": thousands_cell(
+                sum(v for _, v in vend)),
             "Vendors over threshold": "; ".join(
                 "%s %s" % (n, thousands(v)) for n, v in big),
         })
