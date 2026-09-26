@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v15 - 20 Sep"
+VERSION = "v16 - 26 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -672,6 +672,18 @@ def main():
     a = ap.parse_args()
     if a.week and a.month is not None:
         sys.exit("Use --week or --month, not both.")
+    if a.month:
+        bits = a.month.strip().split("-")
+        ok = len(bits) == 2 and bits[0].isdigit() and bits[1].isdigit()
+        ok = ok and len(bits[0]) == 4 and 1 <= int(bits[1]) <= 12
+        if not ok:
+            sys.exit(
+                "\n--month takes a year AND a month, like 2026-08.\n"
+                "You gave: %s\n\n"
+                "    --month 2026-08     August 2026\n"
+                "    --month             the month that has just finished\n"
+                % a.month)
+
     if a.find_hierarchy and not a.find_hierarchy.strip().isdigit():
         sys.exit(
             "\n'%s' is not a price list number.\n\n"
@@ -771,7 +783,8 @@ def main():
     pls = [p for p in everything if _norm(status_of(p)) in wanted]
     left_out = [p for p in everything if _norm(status_of(p)) not in wanted]
 
-    print("Price lists submitted in the week: %d" % len(everything))
+    print("Price lists submitted in the %s: %d"
+          % (label.lower(), len(everything)))
     print("Counted: %d.  Left out: %d." % (len(pls), len(left_out)))
     if left_out:
         seen = sorted(set(status_of(p) or "(blank)" for p in left_out))
@@ -945,7 +958,8 @@ def write_category_summary(entries, start, end, out_dir):
         for pid, name, total, parts, stock, how in entries:
             for cat, amount in parts:
                 cat_how = ("1st level hierarchy" if len(parts) > 1
-                           else ("name" if cat else "covers both"))
+                           else ("name" if cat
+                                 else "no category in the name"))
                 w.writerow([pid, name, round(amount / 1000.0, 1),
                             cat or CROSS, stock,
                             "category by %s, stocked by %s" % (cat_how, how)])
