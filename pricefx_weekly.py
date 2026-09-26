@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v17 - 26 Sep"
+VERSION = "v18 - 26 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -471,13 +471,22 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
                 uniq.append(f)
         candidates = uniq
     known_plci = set(PLCI_PROBE)
-    cats, plcis, populated, errors = [], [], [], 0
+    cats, plcis, populated, errors, empty = [], [], [], 0, 0
+    why = []
     for f in candidates:
         try:
             rows = rows_from(summarize(s, url, pl_id, f))
-        except Exception:
+        except Exception as e:
+            # Keep the reason. Counting failures without showing one of them
+            # is how a probe reports "found nothing" when the truth is "every
+            # call was refused, and here is what it said".
             errors += 1
+            if len(why) < 3:
+                why.append("%s -> %s: %s"
+                           % (f, type(e).__name__, str(e)[:200]))
             continue
+        if not rows:
+            empty += 1
         hits, seen = score_as_hierarchy(rows, f)
         if seen:
             cats.append((hits, seen, f))
@@ -494,7 +503,7 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
             plcis.append((phits, pseen, f))
     cats.sort(key=lambda x: (-x[0], x[1]))
     plcis.sort(key=lambda x: (-x[0], x[1]))
-    return cats, plcis, populated, errors
+    return cats, plcis, populated, errors, empty, why
 
 
 def classify_plci(rows, stocked, nonstocked):
@@ -744,11 +753,17 @@ def main():
             pid = some[0].get("id")
         print("\nTesting Group By against price list %s" % pid)
         print("Looking for the field whose values are your 22 categories.\n")
-        cats, plcis, populated, errors = find_hierarchy_field(s_sess, url, pid)
+        cats, plcis, populated, errors, empty, why = find_hierarchy_field(
+            s_sess, url, pid)
         lines = []
         control = [p for p in populated if p[0] == VENDOR_FIELD]
-        print("Tried %d fields: %d came back with values, %d were rejected."
-              % (len(populated) + errors, len(populated), errors))
+        print("Tried %d fields: %d came back with values, %d came back empty, "
+              "%d were refused."
+              % (len(populated) + errors + empty, len(populated), empty, errors))
+        if why:
+            print("\nWhat the refusals actually said:")
+            for w in why:
+                print("  %s" % w)
         if control:
             print("Positive control: %s (Vendor Name) returned %d values, "
                   "so the probe itself works.\n" % (VENDOR_FIELD, control[0][1]))
