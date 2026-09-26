@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v19 - 26 Sep"
+VERSION = "v20 - 26 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -404,44 +404,101 @@ def drop_grand_total(rows):
     return [r for i, r in enumerate(rows) if i != drop]
 
 
+# Columns that are never the Group By value: the metrics that were asked for,
+# and the row count that comes back with count=True.
+COUNT_NAMES = set(["count", "rowcount", "totalcount", "recordcount", "rows"])
+
+
+def is_metric_key(k):
+    """Is this reply column one of the numbers, rather than the label."""
+    n = _norm(k)
+    if n in METRIC_NAMES or n in COUNT_NAMES:
+        return True
+    # sum_SKU_Impact, skuImpactSum and so on. Only the long metric names, or
+    # 'atp' would match half the alphabet.
+    return any(m in n for m in METRIC_NAMES if len(m) >= 5)
+
+
+def label_keys(rows):
+    """Every column in the reply that could be carrying the Group By value.
+
+    The reply does NOT have to key the group by the field that was requested -
+    that is the '(no vendor)' bug of 20 Sep, where the vendor came back under a
+    key I had never seen. The hierarchy probe read r.get(field), so every field
+    that DID exist looked empty and the positive control failed on attribute19,
+    the one field the whole report is known to work with.
+
+    So do not pick one key: score them all and say which one carried it.
+    """
+    keys = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        for k in r:
+            if k not in keys and not is_metric_key(k):
+                keys.append(k)
+    return keys
+
+
 def score_as_hierarchy(rows, field):
     """How many DISTINCT values in these rows are one of the 22 categories.
 
     This is what makes finding the hierarchy field a measurement rather than a
     guess: the category list is known exactly, so the right field is the one
     whose values ARE those categories. A wrong field scores zero.
+
+    field is accepted for the caller's convenience and tried first, but every
+    other column is scored too, because the reply need not use that name.
+    Returns (hits, seen, key) - key being the column the score came from.
     """
     known = set(cat_norm(c) for c in CATEGORIES)
-    seen, hits = set(), set()
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        v = r.get(field)
-        if v in (None, ""):
-            continue
-        n = cat_norm(v)
-        seen.add(n)
-        if n in known:
-            hits.add(n)
-    return len(hits), len(seen)
+    best = (0, 0, None)
+    for k in ([field] if field else []) + label_keys(rows):
+        seen, hits = set(), set()
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            v = r.get(k)
+            if v in (None, ""):
+                continue
+            n = cat_norm(v)
+            if not n:
+                continue
+            seen.add(n)
+            if n in known:
+                hits.add(n)
+        if (len(hits), len(seen)) > (best[0], best[1]):
+            best = (len(hits), len(seen), k)
+    return best
 
 
 def score_as_plci(rows, field, known):
-    """How many distinct values of this field are known PLCI codes."""
-    seen, hits = set(), set()
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        v = r.get(field)
-        if v in (None, ""):
-            continue
-        t = str(v).strip()
-        if t.endswith(".0"):
-            t = t[:-2]
-        seen.add(t)
-        if t in known:
-            hits.add(t)
-    return len(hits), len(seen)
+    """How many distinct values are known PLCI codes, over every column.
+
+    Same reason as above. Note the codes are NUMBERS, so a column cannot be
+    ruled in or out by 'is it text' the way the vendor name could be.
+    Returns (hits, seen, key).
+    """
+    best = (0, 0, None)
+    for k in ([field] if field else []) + label_keys(rows):
+        seen, hits = set(), set()
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            v = r.get(k)
+            if v in (None, ""):
+                continue
+            t = str(v).strip()
+            if t.endswith(".0"):
+                t = t[:-2]
+            if not t:
+                continue
+            seen.add(t)
+            if t in known:
+                hits.add(t)
+        if (len(hits), len(seen)) > (best[0], best[1]):
+            best = (len(hits), len(seen), k)
+    return best
 
 
 def find_hierarchy_field(s, url, pl_id, candidates=None):
@@ -472,7 +529,7 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
                 uniq.append(f)
         candidates = uniq
     known_plci = set(PLCI_PROBE)
-    cats, plcis, populated, errors, empty = [], [], [], 0, 0
+    cats, plcis, populated, errors, empty, blank = [], [], [], 0, 0, 0
     why = []
     for f in candidates:
         try:
@@ -492,23 +549,32 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
             continue
         if not rows:
             empty += 1
-        hits, seen = score_as_hierarchy(rows, f)
+            continue
+        hits, seen, ckey = score_as_hierarchy(rows, f)
+        phits, pseen, pkey = score_as_plci(rows, f, known_plci)
         if seen:
             cats.append((hits, seen, f))
-            sample = []
-            for r in rows:
-                v = r.get(f) if isinstance(r, dict) else None
-                if v not in (None, "") and str(v) not in sample:
-                    sample.append(str(v))
-                if len(sample) == 3:
-                    break
-            populated.append((f, seen, sample))
-        phits, pseen = score_as_plci(rows, f, known_plci)
         if pseen:
             plcis.append((phits, pseen, f))
+        if not seen and not pseen:
+            # Rows came back, but no column in them held a value. This bucket
+            # existed before and was counted NOWHERE, so the totals did not add
+            # up to the number of fields tried and thirty live attributes were
+            # invisible. Count it, and print it.
+            blank += 1
+            continue
+        key = ckey or pkey
+        sample = []
+        for r in rows:
+            v = r.get(key) if isinstance(r, dict) else None
+            if v not in (None, "") and str(v) not in sample:
+                sample.append(str(v))
+            if len(sample) == 3:
+                break
+        populated.append((f, max(seen, pseen), sample, key))
     cats.sort(key=lambda x: (-x[0], x[1]))
     plcis.sort(key=lambda x: (-x[0], x[1]))
-    return cats, plcis, populated, errors, empty, why
+    return cats, plcis, populated, errors, empty, blank, why, len(candidates)
 
 
 def classify_plci(rows, stocked, nonstocked):
@@ -676,6 +742,14 @@ def vendor_impacts(summary, key_hint=None):
         return [], None
     sample = rows[0]
     vkey = key_hint if (key_hint and key_hint in sample) else pick_vendor_key(rows)
+    if not vkey:
+        # pick_vendor_key looks for TEXT among numbers, which is right for a
+        # vendor name and wrong for a PLCI code - the codes are numbers, so it
+        # finds nothing and every row comes back unlabelled. Fall back on any
+        # column that is not one of the metrics.
+        holds = [k for k in label_keys(rows)
+                 if any(r.get(k) not in (None, "") for r in rows)]
+        vkey = holds[0] if holds else None
     ikey = find_key(sample, "SKU Impact", "skuImpact", "sum_SKU_Impact")
     if not ikey:
         return [], sample
@@ -769,27 +843,35 @@ def main():
                   "the server refuse them." % (pid, _size((small or some)[0])))
         print("\nTesting Group By against price list %s" % pid)
         print("Looking for the field whose values are your 22 categories.\n")
-        cats, plcis, populated, errors, empty, why = find_hierarchy_field(
-            s_sess, url, pid)
+        (cats, plcis, populated, errors, empty, blank, why,
+         tried) = find_hierarchy_field(s_sess, url, pid)
         lines = []
         control = [p for p in populated if p[0] == VENDOR_FIELD]
-        print("Tried %d fields: %d came back with values, %d came back empty, "
-              "%d were refused."
-              % (len(populated) + errors + empty, len(populated), empty, errors))
+        print("Tried %d fields: %d came back with values, %d answered with no "
+              "value in any column, %d came back empty, %d were refused."
+              % (tried, len(populated), blank, empty, errors))
+        # If these do not add up, a bucket is being lost - which is exactly how
+        # thirty live attributes went uncounted last time.
+        assert len(populated) + blank + empty + errors == tried
         if why:
             print("\nWhat the refusals actually said:")
             for w in why:
                 print("  %s" % w)
         if control:
-            print("Positive control: %s (Vendor Name) returned %d values, "
-                  "so the probe itself works.\n" % (VENDOR_FIELD, control[0][1]))
+            print("Positive control: %s (Vendor Name) returned %d values under "
+                  "the column '%s', so the probe itself works.\n"
+                  % (VENDOR_FIELD, control[0][1], control[0][3]))
         else:
-            print("Positive control FAILED: even %s returned nothing, so this "
-                  "price list has no data to group by. Try another one.\n"
-                  % VENDOR_FIELD)
+            print("Positive control FAILED: %s returned no readable values, "
+                  "and the report reads that field successfully every run - so "
+                  "this is the probe, not the price list.\n" % VENDOR_FIELD)
 
         print("1st LEVEL HIERARCHY - looking for your 22 categories")
-        if cats and cats[0][0] >= 2:
+        # Two matches, or one where EVERY value it returned is a category - a
+        # price list covering a single category would otherwise fail the test
+        # for being too tidy.
+        if cats and (cats[0][0] >= 2 or (cats[0][0] >= 1
+                                         and cats[0][0] == cats[0][1])):
             for hits, seen, f in cats[:6]:
                 mark = "  <-- this one" if hits == cats[0][0] else ""
                 print("  %-16s %2d of %2d values are known categories%s"
@@ -821,7 +903,7 @@ def main():
             print("\nEvery field that DID return values, with a few examples.")
             print("If one of these is your 1st level hierarchy or your PLCI,")
             print("tell me its name - you do not need to send me the values.\n")
-            for f, seen, sample in populated:
+            for f, seen, sample, key in populated:
                 print("  %-16s %3d values   e.g. %s"
                       % (f, seen, ", ".join(x[:28] for x in sample)))
         print("\nThis price list may simply not contain every category or code.")
