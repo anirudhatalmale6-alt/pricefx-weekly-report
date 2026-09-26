@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v20 - 26 Sep"
+VERSION = "v21 - 26 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -501,6 +501,35 @@ def score_as_plci(rows, field, known):
     return best
 
 
+def convincing_hierarchy(hits, seen):
+    """Is this field the category list, or does it just contain a few of them.
+
+    26 Sep: the 2nd and 3rd level hierarchies scored 1 of 110 and 1 of 262 -
+    they share a name with one 1st level category. The real one scored 15 of
+    16. So the test is what FRACTION of the field's values are categories, not
+    how many; counting hits alone would have crowned a field on a price list
+    that happened to cover two categories.
+    """
+    if hits < 2 or not seen:
+        # Unless every single value it returned is a category - a price list
+        # covering one category would otherwise fail for being too tidy.
+        return hits >= 1 and hits == seen
+    return hits * 2 >= seen or hits >= 10
+
+
+def convincing_plci(hits, seen):
+    """PLCI is a SHORT code list. A field with hundreds of distinct numbers
+    that happens to include 25 and 45 is not it.
+
+    26 Sep: four fields scored '6 of 298', '6 of 793', '6 of 2854', '6 of
+    2910' - all six codes present, purely because those fields hold every
+    number from 0 upwards. Picking one would have mis-stocked every price list
+    from then on, silently. So cap the distinct values at twice the number of
+    codes being looked for.
+    """
+    return hits >= 2 and seen <= 2 * len(PLCI_PROBE)
+
+
 def find_hierarchy_field(s, url, pl_id, candidates=None):
     """Work out which product attribute holds the 1st level hierarchy.
 
@@ -572,8 +601,11 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
             if len(sample) == 3:
                 break
         populated.append((f, max(seen, pseen), sample, key))
-    cats.sort(key=lambda x: (-x[0], x[1]))
-    plcis.sort(key=lambda x: (-x[0], x[1]))
+    # Convincing ones first, THEN by score. Sorting by score alone puts a field
+    # holding 298 different numbers above the real six-code one, and any caller
+    # that reads [0] without re-applying the test gets the wrong field.
+    cats.sort(key=lambda x: (not convincing_hierarchy(x[0], x[1]), -x[0], x[1]))
+    plcis.sort(key=lambda x: (not convincing_plci(x[0], x[1]), -x[0], x[1]))
     return cats, plcis, populated, errors, empty, blank, why, len(candidates)
 
 
@@ -867,27 +899,33 @@ def main():
                   "this is the probe, not the price list.\n" % VENDOR_FIELD)
 
         print("1st LEVEL HIERARCHY - looking for your 22 categories")
-        # Two matches, or one where EVERY value it returned is a category - a
-        # price list covering a single category would otherwise fail the test
-        # for being too tidy.
-        if cats and (cats[0][0] >= 2 or (cats[0][0] >= 1
-                                         and cats[0][0] == cats[0][1])):
-            for hits, seen, f in cats[:6]:
-                mark = "  <-- this one" if hits == cats[0][0] else ""
-                print("  %-16s %2d of %2d values are known categories%s"
-                      % (f, hits, seen, mark))
-            lines.append("hierarchy_field = %s" % cats[0][2])
+        good = [c for c in cats if convincing_hierarchy(c[0], c[1])]
+        for hits, seen, f in cats[:6]:
+            mark = "  <-- this one" if good and f == good[0][2] else ""
+            print("  %-16s %3d of %4d values are known categories%s"
+                  % (f, hits, seen, mark))
+        if good:
+            lines.append("hierarchy_field = %s" % good[0][2])
         else:
-            print("  nothing matched the category list")
+            print("  nothing on this price list looks like the category list")
 
-        print("\nPLCI - looking for codes %s"
-              % ", ".join(PLCI_PROBE))
-        if plcis and plcis[0][0] >= 2:
-            for hits, seen, f in plcis[:6]:
-                mark = "  <-- this one" if hits == plcis[0][0] else ""
-                print("  %-16s %2d of %2d values are known PLCI codes%s"
-                      % (f, hits, seen, mark))
-            lines.append("plci_field = %s" % plcis[0][2])
+        print("\nPLCI - looking for codes %s" % ", ".join(PLCI_PROBE))
+        goodp = [p for p in plcis if convincing_plci(p[0], p[1])]
+        for hits, seen, f in plcis[:6]:
+            mark = "  <-- this one" if goodp and f == goodp[0][2] else ""
+            print("  %-16s %3d of %4d values are known PLCI codes%s"
+                  % (f, hits, seen, mark))
+        if goodp:
+            lines.append("plci_field = %s" % goodp[0][2])
+        elif plcis and plcis[0][0] >= 2:
+            # A field holding hundreds of different numbers will contain the
+            # six PLCI codes somewhere by sheer chance. That is not a code
+            # list, and recommending it would quietly mis-stock every price
+            # list from then on.
+            print("  none of these is a PLCI code list - they hold hundreds of")
+            print("  different numbers and merely happen to include the codes.")
+            print("  Leave plci_field empty and stocked / non-stocked keeps")
+            print("  coming from the price list name, as it does today.")
         else:
             print("  nothing matched the PLCI codes")
 
