@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v16 - 26 Sep"
+VERSION = "v17 - 26 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -88,6 +88,15 @@ CATEGORY_ALIASES = {
 }
 
 CROSS = "Notable Cross Category"
+
+# The Summary screen's Group By calls this "Internet Hierarchy 1" and its values
+# are the 22 categories. The field behind that label is not attribute1-40, so
+# these spellings are tried as well.
+HIERARCHY_NAME_GUESSES = [
+    "internetHierarchy1", "InternetHierarchy1", "internet_hierarchy_1",
+    "internethierarchy1", "internetHierarchyLevel1", "hierarchy1",
+    "productHierarchy1", "level1", "ih1",
+]
 
 # PLCI is the product code that says whether a part is stocked. His words:
 # "Stocked PLCI is 25 and 45 always / Non-Stocked PLCI is 14, 34, 74, 84".
@@ -445,11 +454,22 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
         # VENDOR_FIELD is included deliberately as a positive control: it is
         # known to work, so if even that comes back empty the probe itself is
         # broken and "nothing matched" means nothing at all.
+        # VENDOR_FIELD first as the positive control. Then every attribute up
+        # to 80 - the first search stopped at 40 and found nothing even though
+        # the Summary screen clearly groups by this field, so 1-40 is not where
+        # it lives. Then names built from the label itself, in case it is not
+        # an attribute at all.
         candidates = [VENDOR_FIELD]
-        for i in range(1, 41):
-            f = "attribute%d" % i
-            if f not in candidates:
-                candidates.append(f)
+        for i in range(1, 81):
+            candidates.append("attribute%d" % i)
+        for guess in HIERARCHY_NAME_GUESSES:
+            candidates.append(guess)
+        seen_c, uniq = set(), []
+        for f in candidates:
+            if f not in seen_c:
+                seen_c.add(f)
+                uniq.append(f)
+        candidates = uniq
     known_plci = set(PLCI_PROBE)
     cats, plcis, populated, errors = [], [], [], 0
     for f in candidates:
@@ -728,7 +748,7 @@ def main():
         lines = []
         control = [p for p in populated if p[0] == VENDOR_FIELD]
         print("Tried %d fields: %d came back with values, %d were rejected."
-              % (41, len(populated), errors))
+              % (len(populated) + errors, len(populated), errors))
         if control:
             print("Positive control: %s (Vendor Name) returned %d values, "
                   "so the probe itself works.\n" % (VENDOR_FIELD, control[0][1]))
