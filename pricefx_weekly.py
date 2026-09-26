@@ -34,7 +34,7 @@ CONFIG = os.path.join(HERE, "pricefx_config.ini")
 # Printed on the first line of every run. If this is not the version you were
 # told to expect, the file you downloaded is not the file that just ran - which
 # has happened, and cost an evening of chasing bugs that were already fixed.
-VERSION = "v18 - 26 Sep"
+VERSION = "v19 - 26 Sep"
 
 # Vendor Name lives in attribute19 - confirmed from the Summary screen's own
 # request, where Group By = Vendor Name sends productGroupBy=attribute19.
@@ -275,7 +275,7 @@ def fetch_price_lists(s, url, start, end):
     return out
 
 
-def summarize(s, url, pl_id, group_field=None):
+def summarize(s, url, pl_id, group_field=None, projections=None):
     """The Calculate button. Returns rows with SKU Impact already summed.
 
     group_field is what the Summary screen's Group By is set to. attribute19 is
@@ -288,7 +288,8 @@ def summarize(s, url, pl_id, group_field=None):
             "productGroupBy": group_field or VENDOR_FIELD,
             "count": True,
             "projections": [{"weight": "null", "aggregationMode": mode,
-                             "fieldName": field} for mode, field in PROJECTIONS],
+                             "fieldName": field}
+                            for mode, field in (projections or PROJECTIONS)],
         }}
     }, {"dataLocale": "en"})
 
@@ -475,7 +476,11 @@ def find_hierarchy_field(s, url, pl_id, candidates=None):
     why = []
     for f in candidates:
         try:
-            rows = rows_from(summarize(s, url, pl_id, f))
+            # One aggregate, not all nine. The probe makes ~90 of these
+            # calls in a row and the full set against a 34,000 item list
+            # makes the server give up with a 500.
+            rows = rows_from(summarize(s, url, pl_id, f,
+                                       projections=[("SUM", "SKU Impact")]))
         except Exception as e:
             # Keep the reason. Counting failures without showing one of them
             # is how a probe reports "found nothing" when the truth is "every
@@ -750,7 +755,18 @@ def main():
             if not some:
                 sys.exit("No price lists in that window to test against. "
                          "Pass one: --find-hierarchy 4271")
-            pid = some[0].get("id")
+            # Smallest first. Probing is ~90 calls, and on a 34,000 item list
+            # the server starts returning 500s long before it finishes.
+            def _size(p):
+                try:
+                    return int(p.get("numberOfItems") or 0)
+                except (TypeError, ValueError):
+                    return 0
+            small = sorted([p for p in some if _size(p) > 0], key=_size)
+            pid = (small or some)[0].get("id")
+            print("Using price list %s - the smallest in the window at %s "
+                  "items, because probing is many calls and a big list makes "
+                  "the server refuse them." % (pid, _size((small or some)[0])))
         print("\nTesting Group By against price list %s" % pid)
         print("Looking for the field whose values are your 22 categories.\n")
         cats, plcis, populated, errors, empty, why = find_hierarchy_field(
